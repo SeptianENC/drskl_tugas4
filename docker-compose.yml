@@ -1,0 +1,331 @@
+version: "3.9"
+
+services:
+  # ============================================
+  # Redis Cluster - 3 nodes untuk in-memory cache
+  # ============================================
+  redis-1:
+    image: redis:7-alpine
+    command: >
+      redis-server
+      --port 7001
+      --cluster-enabled yes
+      --cluster-config-file nodes-7001.conf
+      --cluster-node-timeout 5000
+      --appendonly yes
+      --maxmemory 50mb
+      --maxmemory-policy allkeys-lru
+      --save ""
+    ports:
+      - "7001:7001"
+    volumes:
+      - redis-1-data:/data
+    networks:
+      - simnet
+    healthcheck:
+      test: ["CMD", "redis-cli", "-p", "7001", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  redis-2:
+    image: redis:7-alpine
+    command: >
+      redis-server
+      --port 7002
+      --cluster-enabled yes
+      --cluster-config-file nodes-7002.conf
+      --cluster-node-timeout 5000
+      --appendonly yes
+      --maxmemory 50mb
+      --maxmemory-policy allkeys-lru
+      --save ""
+    ports:
+      - "7002:7002"
+    volumes:
+      - redis-2-data:/data
+    networks:
+      - simnet
+    healthcheck:
+      test: ["CMD", "redis-cli", "-p", "7002", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  redis-3:
+    image: redis:7-alpine
+    command: >
+      redis-server
+      --port 7003
+      --cluster-enabled yes
+      --cluster-config-file nodes-7003.conf
+      --cluster-node-timeout 5000
+      --appendonly yes
+      --maxmemory 50mb
+      --maxmemory-policy allkeys-lru
+      --save ""
+    ports:
+      - "7003:7003"
+    volumes:
+      - redis-3-data:/data
+    networks:
+      - simnet
+    healthcheck:
+      test: ["CMD", "redis-cli", "-p", "7003", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  redis-cluster-init:
+    image: redis:7-alpine
+    depends_on:
+      redis-1:
+        condition: service_healthy
+      redis-2:
+        condition: service_healthy
+      redis-3:
+        condition: service_healthy
+    command: >
+      sh -c "
+      sleep 5 &&
+      redis-cli --cluster create redis-1:7001 redis-2:7002 redis-3:7003 --cluster-replicas 0 --cluster-yes
+      "
+    networks:
+      - simnet
+    restart: "no"
+
+  redis-exporter:
+    image: oliver006/redis_exporter:latest
+    command: ["--redis.addr="]
+    ports:
+      - "9121:9121"
+    depends_on:
+      - redis-cluster-init
+    networks:
+      - simnet
+
+  # ============================================
+  # HDFS Cluster - untuk on-disk KV Store (1 Namenode + 3 Datanode)
+  # ============================================
+  namenode:
+    image: bde2020/hadoop-namenode:2.0.0-hadoop3.2.1-java8
+    container_name: namenode
+    environment:
+      - CLUSTER_NAME=test
+      - CORE_CONF_fs_defaultFS=hdfs://namenode:9000
+      - HDFS_CONF_dfs_replication=2
+      - HDFS_CONF_dfs_blocksize=128m
+    ports:
+      - "9870:9870" # Web UI
+      - "9000:9000" # HDFS port
+    volumes:
+      - namenode-data:/hadoop/dfs/name
+    networks:
+      - simnet
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9870"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  datanode:
+    image: bde2020/hadoop-datanode:2.0.0-hadoop3.2.1-java8
+    container_name: datanode
+    environment:
+      - CORE_CONF_fs_defaultFS=hdfs://namenode:9000
+      - SERVICE_PRECONDITION=namenode:9870
+    ports:
+      - "9864:9864" # Web UI
+    volumes:
+      - datanode-data:/hadoop/dfs/data
+    depends_on:
+      namenode:
+        condition: service_healthy
+    networks:
+      - simnet
+
+  datanode-2:
+    image: bde2020/hadoop-datanode:2.0.0-hadoop3.2.1-java8
+    container_name: datanode-2
+    environment:
+      - CORE_CONF_fs_defaultFS=hdfs://namenode:9000
+      - SERVICE_PRECONDITION=namenode:9870
+    ports:
+      - "9865:9864" # Web UI (host 9865)
+    volumes:
+      - datanode-2-data:/hadoop/dfs/data
+    depends_on:
+      namenode:
+        condition: service_healthy
+    networks:
+      - simnet
+
+  datanode-3:
+    image: bde2020/hadoop-datanode:2.0.0-hadoop3.2.1-java8
+    container_name: datanode-3
+    environment:
+      - CORE_CONF_fs_defaultFS=hdfs://namenode:9000
+      - SERVICE_PRECONDITION=namenode:9870
+    ports:
+      - "9866:9864" # Web UI (host 9866)
+    volumes:
+      - datanode-3-data:/hadoop/dfs/data
+    depends_on:
+      namenode:
+        condition: service_healthy
+    networks:
+      - simnet
+
+  hdfs-exporter:
+    image: epilet/hadoop_exporter:latest
+    command:
+      - -namenode.jmx.url=http://namenode:9870/jmx
+      - -web.listen-address=:9070
+      - -web.telemetry-path=/metrics
+    ports:
+      - "9070:9070"
+    depends_on:
+      namenode:
+        condition: service_healthy
+    networks:
+      - simnet
+
+  # ============================================
+  # Application Services
+  # ============================================
+  ingestor:
+    build:
+      context: ./app
+      dockerfile: Dockerfile
+      target: ingestor
+    environment:
+      - REDIS_STARTUP_NODES=redis-1:7001,redis-2:7002,redis-3:7003
+      - HDFS_PATH=/events_overflow
+      - REDIS_MAXMEM_SOFT=0.80
+      - LOCAL_CACHE_HOTKEYS=1
+    depends_on:
+      - redis-cluster-init
+      - namenode
+      - datanode
+      - datanode-2
+      - datanode-3
+    ports:
+      - "8080:8080"
+    networks:
+      - simnet
+    restart: unless-stopped
+
+  generator:
+    build:
+      context: ./app
+      dockerfile: Dockerfile
+      target: generator
+    environment:
+      - INGESTOR_URL=http://ingestor:8080
+      - HOTKEY_RATIO=0.20
+      - RPS=200
+    depends_on:
+      - ingestor
+    networks:
+      - simnet
+    restart: unless-stopped
+
+  hotkey-manager:
+    build:
+      context: ./app
+      dockerfile: Dockerfile
+      target: hotkey-manager
+    environment:
+      - REDIS_STARTUP_NODES=redis-1:7001,redis-2:7002,redis-3:7003
+      - HOTKEY_THRESHOLD_PER_MIN=2000
+      - ENABLE_RESHARD=0
+    depends_on:
+      - redis-cluster-init
+    networks:
+      - simnet
+    restart: unless-stopped
+
+  offloader:
+    build:
+      context: ./app
+      dockerfile: Dockerfile
+      target: offloader
+    environment:
+      - REDIS_STARTUP_NODES=redis-1:7001,redis-2:7002,redis-3:7003
+      - HDFS_PATH=/events_overflow
+      - OFFLOAD_AFTER_SECONDS=30
+      - OFFLOAD_INTERVAL_SECONDS=15
+      - OFFLOAD_FORCE_MEM_RATIO=0.60
+      - OFFLOAD_FORCE_MIN_AGE_SECONDS=10
+    depends_on:
+      - redis-cluster-init
+      - namenode
+      - datanode
+      - datanode-2
+      - datanode-3
+    networks:
+      - simnet
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: prometheus
+    user: root
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--web.console.libraries=/usr/share/prometheus/console_libraries"
+      - "--web.console.templates=/usr/share/prometheus/consoles"
+      - "--web.listen-address=0.0.0.0:9090"
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    depends_on:
+      - redis-exporter
+      - hdfs-exporter
+    networks:
+      - simnet
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+      # Agar datasource dan dashboard ter-load otomatis tanpa konfigurasi manual
+      - GF_PATHS_PROVISIONING=/etc/grafana/provisioning
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      # Provisioning: datasource Prometheus + dashboard Redis
+      - ./grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+    depends_on:
+      - prometheus
+    networks:
+      - simnet
+
+# ============================================
+# Networks
+# ============================================
+networks:
+  simnet:
+    driver: bridge
+
+# ============================================
+# Volumes
+# ============================================
+volumes:
+  redis-1-data:
+  redis-2-data:
+  redis-3-data:
+  namenode-data:
+  datanode-data:
+  datanode-2-data:
+  datanode-3-data:
+  prometheus-data:
+  grafana-data:

@@ -1,0 +1,46 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    cluster: 'monolith-kv-sim'
+    environment: 'development'
+
+scrape_configs:
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+
+  # Redis: multi-target pattern agar tiap node punya label instance sendiri
+  # Request: GET http://redis-exporter:9121/scrape?target=redis://redis-1:7001 (dan 7002, 7003)
+  - job_name: 'redis_exporter_targets'
+    static_configs:
+      - targets:
+          - redis://redis-1:7001
+          - redis://redis-2:7002
+          - redis://redis-3:7003
+        labels:
+          component: 'redis-cluster'
+          storage_type: 'in-memory-cache'
+    metrics_path: /scrape
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+      - source_labels: [__param_target]
+        target_label: instance
+      - target_label: __address__
+        replacement: redis-exporter:9121
+
+  # Exporter sendiri (opsional, untuk uptime dll)
+  - job_name: 'redis_exporter'
+    static_configs:
+      - targets: ['redis-exporter:9121']
+        labels:
+          component: 'redis-exporter'
+
+  # HDFS exporter - metrics dari Namenode JMX
+  - job_name: 'hdfs'
+    static_configs:
+      - targets: ['hdfs-exporter:9070']
+        labels:
+          component: 'hdfs-cluster'
+          storage_type: 'on-disk-kv-store'

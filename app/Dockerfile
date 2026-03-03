@@ -1,0 +1,66 @@
+# ---------- build stage ----------
+FROM golang:1.22-alpine AS build
+RUN apk add --no-cache git bash curl openjdk11-jre
+WORKDIR /src
+# Salin go.mod dulu untuk download dependencies
+COPY go.mod ./
+# Download dependencies (ini akan populate module cache)
+RUN go mod download
+# Salin source code (folder bermasalah sudah di-exclude oleh .dockerignore)
+COPY . .
+# Generate go.sum dengan go mod tidy setelah semua source code di-copy
+# go.sum diperlukan oleh go build untuk verifikasi checksum
+RUN go mod tidy
+
+# Build binaries
+RUN CGO_ENABLED=0 go build -o /out/ingestor ./cmd/ingestor
+RUN CGO_ENABLED=0 go build -o /out/generator ./cmd/generator
+RUN CGO_ENABLED=0 go build -o /out/hotkey-manager ./cmd/hotkey-manager
+RUN CGO_ENABLED=0 go build -o /out/offloader ./cmd/offloader
+
+# Install hadoop client (for hdfs dfs)
+RUN mkdir -p /opt \
+ && wget -qO- https://archive.apache.org/dist/hadoop/common/hadoop-3.2.1/hadoop-3.2.1.tar.gz | tar -xz -C /opt \
+ && ln -s /opt/hadoop-3.2.1 /opt/hadoop
+
+# ---------- runtime ingestor ----------
+FROM alpine:3.20 AS ingestor
+RUN apk add --no-cache bash curl openjdk11-jre
+ENV JAVA_HOME=/usr/lib/jvm/java-11-openjdk
+COPY --from=build /opt/hadoop-3.2.1 /opt/hadoop
+RUN mkdir -p /opt/hadoop/etc/hadoop && printf '%s\n' \
+  '<?xml version="1.0"?><configuration>' \
+  '<property><name>fs.defaultFS</name><value>hdfs://namenode:9000</value></property>' \
+  '</configuration>' > /opt/hadoop/etc/hadoop/core-site.xml
+ENV HADOOP_HOME=/opt/hadoop
+ENV PATH="${HADOOP_HOME}/bin:${PATH}"
+COPY --from=build /out/ingestor /app/ingestor
+EXPOSE 8080
+ENTRYPOINT ["/app/ingestor"]
+
+# ---------- runtime generator ----------
+FROM alpine:3.20 AS generator
+RUN apk add --no-cache bash curl
+COPY --from=build /out/generator /app/generator
+ENTRYPOINT ["/app/generator"]
+
+# ---------- runtime hotkey-manager ----------
+FROM alpine:3.20 AS hotkey-manager
+RUN apk add --no-cache bash curl
+COPY --from=build /out/hotkey-manager /app/hotkey-manager
+ENTRYPOINT ["/app/hotkey-manager"]
+
+# ---------- runtime offloader (Redis -> HDFS) ----------
+FROM alpine:3.20 AS offloader
+RUN apk add --no-cache bash curl openjdk11-jre
+ENV JAVA_HOME=/usr/lib/jvm/java-11-openjdk
+COPY --from=build /opt/hadoop-3.2.1 /opt/hadoop
+# Client HDFS perlu tahu alamat namenode (resolve host "namenode" di Docker network)
+RUN mkdir -p /opt/hadoop/etc/hadoop && printf '%s\n' \
+  '<?xml version="1.0"?><configuration>' \
+  '<property><name>fs.defaultFS</name><value>hdfs://namenode:9000</value></property>' \
+  '</configuration>' > /opt/hadoop/etc/hadoop/core-site.xml
+ENV HADOOP_HOME=/opt/hadoop
+ENV PATH="${HADOOP_HOME}/bin:${PATH}"
+COPY --from=build /out/offloader /app/offloader
+ENTRYPOINT ["/app/offloader"]
