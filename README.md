@@ -537,7 +537,7 @@ Data Storage Apps/
 ├── README.md                         # Dokumen ini
 ├── REDIS_CLUSTER_ACCESS.md          # Akses Redis cluster (CLI, kode, troubleshooting)
 ├── MONITORING_TROUBLESHOOTING.md    # Troubleshooting metrics → Prometheus → Grafana (step-by-step)
-├── docker-compose.yml               # Definisi semua service
+├── docker-compose.yml               # Definisi semua service (Redis Cluster, HDFS, app, monitoring, uptime-kuma)
 ├── prometheus/
 │   └── prometheus.yml          # Scrape config (Redis, HDFS, Prometheus)
 ├── grafana/
@@ -547,19 +547,22 @@ Data Storage Apps/
 │       └── dashboards/
 │           ├── dashboards.yml  # Provider dashboard
 │           └── json/
-│               ├── redis.json # Dashboard Redis
-│               └── hdfs.json  # Dashboard HDFS
+│               ├── redis_official.json # Dashboard Redis (resmi, dimodifikasi untuk cluster)
+│               ├── 14615_rev1.json     # Dashboard Redis (varian lain untuk cluster)
+│               └── hdfs.json           # Dashboard HDFS
 └── app/
-    ├── Dockerfile              # Multi-stage build (ingestor, generator, hotkey-manager)
-    ├── go.mod
+    ├── Dockerfile              # Multi-stage build (ingestor, generator, hotkey-manager, offloader)
+    ├── go.mod / go.sum
     ├── cmd/
-    │   ├── ingestor/           # API HTTP + cache-aside + overflow HDFS
-    │   ├── generator/          # Simulasi traffic
-    │   └── hotkey-manager/     # Pemantauan hot keys
+    │   ├── ingestor/           # API HTTP + cache-aside + overflow HDFS + GET fallback dari HDFS + /health + /seed-old-keys
+    │   ├── generator/          # Simulasi traffic (hot/cold keys) ke Ingestor
+    │   ├── hotkey-manager/     # Pemantauan cluster (placeholder deteksi hot keys / reshard)
+    │   └── offloader/          # Worker: pindahkan data lama dari Redis ke HDFS (per key), log statistik
     └── internal/
-        ├── cachex/             # LRU cache (hot keys)
-        ├── hdfsx/              # Writer HDFS (JSONL)
-        └── redisx/             # Redis Cluster client + ClusterMemRatio
+        ├── cachex/             # LRU cache (hot keys) di sisi Ingestor
+        ├── hdfsx/              # Writer/reader HDFS (JSONL + offloaded KV per key)
+        ├── redisx/             # Redis Cluster client + utilitas (ClusterMemRatio, dsb.)
+        └── metrics/            # (placeholder) paket untuk metric internal (bila ingin menambah Prometheus client / custom metrics)
 ```
 
 ---
